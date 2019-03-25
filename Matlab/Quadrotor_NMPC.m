@@ -4,16 +4,11 @@
 
         clear; clc; close all;
 
-    %--- Add the utility, CasADi and SpatialV2 directories to the Path ---%
-        addpath(genpath('../utils'));
-        
-        CasADi_path = '/home/alejandro_av/Alejandro/PhD_Stuff/Casadi_source/build/install_matlab/matlab'; %~/Documents/casadi
-        matlab2tikz_path = '/home/alejandro_av/Documents/matlab2tikz/src';
-        
-            addpath(CasADi_path);
-            addpath(genpath(matlab2tikz_path));
+    %--- Add the CasADi directory to the Path ---%
+        CasADi_path = '/home/alejandro_av/Alejandro/PhD_Stuff/Casadi_source/build/install_matlab/matlab';
+        addpath(CasADi_path);
 
-        clear CasADi_path matlab2tikz_path
+        clear CasADi_path
         
     %--- Import CasADi ---%
         import casadi.*
@@ -36,27 +31,41 @@
             initial_x = zeros(nx,1);
             
         %--- Desired final position ---%
-            final_pos = [0.01; 0.01; 0.01];
+            final_pos = [0.01; 0.01; 0.01];     % Initial value for final_pos
         
 %% Define Options
 
-    ocp_options = struct;
-
     %--- OCP options ---%
-        model = 'non-linear';                    % 'non-linear' or 'linearized'
-        dt = 0.010;                             % sample time [s]
-        N_horizon = 20;                         % discretization points (Horizon)
+        % Select the model to be used ('non-linear' or 'linearized')
+            model = 'non-linear';
+        % Sample time [s]
+            dt = 0.010;           
+        % Define the horizon (in samples/discretization points)
+            N_horizon = 20;
+            
         
-        U_max = [20; 15; 15; 15];               % input limits
-        U_min = -U_max; 
+        % Input limits
+            max_thrust = 20;        % [N]
+            max_taupsi = 15;        % [N.m]
+            max_tautheta = 15;      % [N.m]
+            max_tauphi = 15;        % [N.m]
+            
+            U_max = [max_thrust; max_taupsi; max_tautheta; max_tauphi];
+            U_min = [0; -max_taupsi; -max_tautheta; -max_tauphi]; 
         
-        Angle_max = [1; 20; 20].*pi/180;        % [psi, theta, phi] limits
-        Angle_min = -Angle_max;
+        % Angle limits
+            max_psi = 5*pi/180;     % [rad]
+            max_theta = 20*pi/180;  % [rad]
+            max_phi = 20*pi/180;    % [rad]
+            
+            Angle_max = [max_psi; max_theta; max_phi];
+            Angle_min = -Angle_max;
         
-        kkt_tol = 1e-1; % 1e-3
+        % Set KKT tolerance for QRQP convergence
+            kkt_tol = 1e-3; % 1e-3
         
     %--- Simulation options ---%
-        N_sim = 250;                         % samples to simulate 170, 300, 400
+        N_sim = 250;                         % samples to simulate
         
     %--- Just-in-time compilation options ---%
         jit_opts = struct;
@@ -64,7 +73,6 @@
         jit_opts.jit_options.compiler_flags = {'-O3'};
         jit_opts.jit_options.verbose = true;
         jit_opts.jit_options.compiler = 'ccache gcc';
-        %jit_opts.jit_options.temp_suffix = false;
         jit_opts.jit_temp_suffix = false;
         jit_opts.compiler = 'shell';
 
@@ -151,26 +159,36 @@
             opti.subject_to(U_min.*ones(size(U)) <= U <= U_max.*ones(size(U)));
         
     %--- Objective setting ---%
-        %objective = 0;
-        V_mats = {};
-        W_eT = diag([0.1; 0.1; 0.1; 0.1*ones(nu,1)]);
+        % Define cell array that will contain the objective/cost function
+            Cost_array = {};
         
-        for k = 1:N_horizon
-            V_mat = [X([1,3,5],k)-pos_end;
-                     U(:,k)                         ];
-            V_mats{end+1} = sqrtm(W_eT)*V_mat;
-            V_mats{end} = [V_mats{end};1e-2*[X(:,k);U(:,k)]];
-        end
-        V_mats{end+1} = 1e-2*X(:,N_horizon+1);
-
-        V_mats = vertcat(V_mats{:});
-
-        objective = dot(V_mats,V_mats);
-
-        opti.minimize(objective);
+        % Objective weights
+            %W_eT = diag([0.1; 0.1; 0.1; 0.1*ones(nu,1)]);
+            W_eT = diag([0.1; 0.1; 0.1; 0.1*ones(nx,1); 0.1*ones(nu,1)]);
         
+        % Define the objective 
+            for k = 1:N_horizon
+                cost_mat = [X([1,3,5],k)-pos_end;
+                            X(:,k)              ;
+                            U(:,k)              ];
+                Cost_array{end+1} = sqrtm(W_eT)*cost_mat;
+                %Cost_array{end} = [Cost_array{end};1e-2*[X(:,k);U(:,k)]];
+            end
+        % Set a final state penalty
+            Cost_array{end+1} = 1e-2*X(:,N_horizon+1);
+
+        % Concatenate vertically the components from the cost array
+            Cost_array = vertcat(Cost_array{:});
+
+        % Make the objective quadratic
+            objective = dot(Cost_array,Cost_array);
+        
+        % Set the objective/cost in the opti environment
+            opti.minimize(objective);
+ 
+%% Get initial OCP solution offline (using IPOPT)
     %--- Set solver back-end for offline solution---%
-        tol = 1e-5; % 1e-9
+        tol = 1e-5;
         options = struct;                   
         options.ipopt.tol = tol;
         options.ipopt.dual_inf_tol = tol;
@@ -190,52 +208,48 @@
     %--- Save the offline optimization solution ---%
         prim_sol = offline_sol.value(opti.x);
         dual_sol = offline_sol.value(opti.lam_g);
+          
         
-        primal_solution   = DM(prim_sol);
-        dual_solution = DM(dual_sol);
+%% Use the QRQP solver for online OCP solution 
 
-            
-        
-%% Use the QRQP solver  
+    %--- Warm-start the OCP with the offline solution ---%
+        opti.set_initial(opti.x, prim_sol);
 
-        
-        %--- Warm-start the solution ---%
-            opti.set_initial(opti.x, primal_solution);
-        
-        %--- Set the solver options ---%               
-            options = struct;
-            options.qpsol = 'qrqp';
-            options.qpsol_options.constr_viol_tol = kkt_tol;
-            options.qpsol_options.dual_inf_tol = kkt_tol;   
-            options.qpsol_options.verbose = true;
-            options.tol_pr = kkt_tol;
-            options.tol_du = kkt_tol;
-            options.min_step_size = 1e-16;
-            options.max_iter = 1; % 150
-            options.max_iter_ls = 0; % 0, 1, 5, 10, 20
-            options.qpsol_options.print_iter = true;
-            options.qpsol_options.print_header = true;
-            options.print_iteration = true;
-            options.print_header = false;
-            options.print_status = false;
-            options.print_time = false; 
-            
-        %--- Set the solver back-end ---%
-            opti.solver('sqpmethod',options)
+    %--- Set the solver options ---%               
+        options = struct;
+        options.qpsol = 'qrqp';
+        options.qpsol_options.constr_viol_tol = kkt_tol;
+        options.qpsol_options.dual_inf_tol = kkt_tol;   
+        options.qpsol_options.verbose = true;
+        options.tol_pr = kkt_tol;
+        options.tol_du = kkt_tol;
+        options.min_step_size = 1e-16;
+        options.max_iter = 1; % 150
+        options.max_iter_ls = 0; % 0, 1, 5, 10, 20
+        options.qpsol_options.print_iter = true;
+        options.qpsol_options.print_header = true;
+        options.print_iteration = true;
+        options.print_header = false;
+        options.print_status = false;
+        options.print_time = false; 
 
-        %--- Set parameters value ---%
-            opti.set_value(X_init,initial_x);
-            opti.set_value(pos_end,final_pos);
-        
-        %--- Solve the OCP ---%
-            tic
-            sol = opti.solve();
-            fprintf('Initial solution found in %f secs\n',toc)
+    %--- Set the solver back-end ---%
+        opti.solver('sqpmethod',options)
+
+    %--- Set parameters value ---%
+        opti.set_value(X_init,initial_x);
+        opti.set_value(pos_end,final_pos);
+
+    %--- Solve the OCP ---%
+        tic
+        qrqp_sol = opti.solve();
+        fprintf('Initial solution found in %f secs\n',toc)
         
         
 %% Code-generate solver
 
-    %--- Create an nlp solver from the opti solver ---%
+    %--- Create an nlp solver from the opti environment ---%
+        % This is the way a function can be generated from the OCP definition
         nlp = struct;
         nlp.f = opti.f;
         nlp.g = opti.g;
@@ -265,7 +279,7 @@
         % This following IF is checking if the code is running on mac, linux, or windows
         if ismac
             % Code to run on Mac platform
-            fprintf('\n\nPlatform not supported. Not using code-generated file\n\n');
+            fprintf('\n\nPlatform not supported. Code-generated file is not going to be used\n\n');
         elseif isunix
             % Command to compile the C file in linux using GCC and CCACHE
             % (CCACHE is not mandatory and can be removed from the command)
@@ -282,9 +296,9 @@
                 mpc_step = external('mpc_step','./libmpc_c.so');    
         elseif ispc
             % Code to run on Windows platform
-            fprintf('\n\nPlatform not supported. Not using code-generated file\n\n');
+            fprintf('\n\nPlatform not supported. Code-generated file is not going to be used\n\n');
         else
-            fprintf('\n\nPlatform not supported. Not using code-generated file\n\n');
+            fprintf('\n\nPlatform not supported. Code-generated file is not going to be used\n\n');
         end
 
  
@@ -303,44 +317,56 @@
             F = Function('F', {X, U}, {F(X,U)}, jit_opts);
         
     %--- Offline solution ---%
-        % Get the results from the offline solution
+        % Get the results from the offline QRQP solution
             % First-step control signal
-                u_to_apply = sol.value(U(:,1));
+                u_to_apply = qrqp_sol.value(U(:,1));
             % Decision variables
-                opti_x = sol.value(opti.x);
+                opti_x = qrqp_sol.value(opti.x);
             % Lagrange multipliers
-                opti_lam = sol.value(opti.lam_g);
+                opti_lam = qrqp_sol.value(opti.lam_g);
+    
+    %--- MPC simulation ---%
+            % Initialize state estimation
+                estimated_state = initial_x;
         
         for i=1:N_sim
             
-            u_history(:,i) = full(u_to_apply);
+            % Log the applied input
+                u_history(:,i) = full(u_to_apply);
             
-            % simulate the system over dt using this control
-            initial_x = full(F(initial_x,u_to_apply));
-            final_pos = final_pos + [0.001; 0.002; 0.005];
+            % Simulate the system over dt using this control (this vector should come directly from the state estimator)
+                estimated_state = full(F(estimated_state,u_to_apply));
+                
+            % Set a final position for the current horizon (this is changing, just as a moving reference)
+                final_pos = final_pos + [0.001; 0.002; 0.005];
 
-            t_mpc = tic;
-            [u_to_apply,opti_x,opti_lam,opti_f] = mpc_step([initial_x;final_pos], opti_x, opti_lam);
-            run_time = toc(t_mpc);
-            fprintf('Iteration # %i, Solution found in %f secs\n',i,run_time);
+            % Actually solve the OCP
+                t_mpc = tic;
+                [u_to_apply,opti_x,opti_lam,opti_f] = mpc_step([estimated_state;final_pos], opti_x, opti_lam);
+                run_time = toc(t_mpc);
+                fprintf('Iteration # %i, Solution found in %f secs\n',i,run_time);
         
-            runtime_history(i) = run_time;
-            x_history(:,i) = initial_x;         % Save the states for post-processing of results
+            % Log the runtime and states for post-processing of results
+                runtime_history(i) = run_time;
+                x_history(:,i) = estimated_state;
         end
 
 %% Post-processing results
-
-        pos_fig = figure(1);
-        plot3(x_history(1,:),x_history(3,:),x_history(5,:));
-        xlabel('$x\ [m]$','Interpreter','latex');
-        ylabel('$y\ [m]$','Interpreter','latex');
-        zlabel('$z\ [m]$','Interpreter','latex');
+    
+        % Plot the position of the quadrotor, acquired during the simulation
+            pos_fig = figure(1);
+            plot3(x_history(1,:),x_history(3,:),x_history(5,:));
+            xlabel('$x\ [m]$','Interpreter','latex');
+            ylabel('$y\ [m]$','Interpreter','latex');
+            zlabel('$z\ [m]$','Interpreter','latex');
         
-        ang_fig = figure(2);
-        hold on;
-        plot(x_history(7,:)); % 'DisplayName','sin(x/2)'
-        plot(x_history(9,:));
-        plot(x_history(11,:));
-        legend({'$\psi$','$\theta$', '$\phi$'},'Interpreter','latex');
+        % Plot the quadrotor angles (in rad)
+            ang_fig = figure(2);
+            hold on;
+            plot(x_history(7,:)); % 'DisplayName','sin(x/2)'
+            plot(x_history(9,:));
+            plot(x_history(11,:));
+            legend({'$\psi$','$\theta$', '$\phi$'},'Interpreter','latex');
+            hold off;
         
         
