@@ -5,8 +5,9 @@
         clear; clc; close all;
 
     %--- Add the CasADi directory to the Path ---%
-        CasADi_path = '/home/alejandro_av/Alejandro/PhD_Stuff/Casadi_source/build/install_matlab/matlab';
-        addpath(CasADi_path);
+        CasADi_path = '/home/alejandro/phd_software/casadi_source/build/install_matlab';
+        CasADi_for_matlab_path = strcat(CasADi_path,'/matlab');
+        addpath(CasADi_for_matlab_path);
 
         clear CasADi_path
         
@@ -32,6 +33,7 @@
             
         %--- Desired final position ---%
             final_pos = [0.01; 0.01; 0.01];     % Initial value for final_pos
+            
         
 %% Define Options
 
@@ -65,7 +67,7 @@
             kkt_tol = 1e-3; % 1e-3
         
     %--- Simulation options ---%
-        N_sim = 250;                         % samples to simulate
+        N_sim = 100;                         % samples to simulate
         
     %--- Just-in-time compilation options ---%
         jit_opts = struct;
@@ -156,7 +158,7 @@
             opti.subject_to(X([2,4,6,8,10,12],end) == zeros(nx/2,1));
         
         % Input constraints
-            opti.subject_to(U_min.*ones(size(U)) <= U <= U_max.*ones(size(U)));
+            %opti.subject_to(U_min.*ones(size(U)) <= U <= U_max.*ones(size(U)));
         
     %--- Objective setting ---%
         % Define cell array that will contain the objective/cost function
@@ -164,7 +166,7 @@
         
         % Objective weights
             %W_eT = diag([0.1; 0.1; 0.1; 0.1*ones(nu,1)]);
-            W_eT = diag([0.1; 0.1; 0.1; 0.1*ones(nx,1); 0.1*ones(nu,1)]);
+            W_eT = diag([0.1*ones(3,1); 1e-5*ones(nx,1); 1e-5*ones(nu,1)]);
         
         % Define the objective 
             for k = 1:N_horizon
